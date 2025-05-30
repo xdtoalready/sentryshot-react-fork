@@ -1,33 +1,234 @@
-<img src="https://codeberg.org/SentryShot/sentryshot-assets/raw/branch/master/screenshots/recordings.png">
+# SentryShot Project: Backend & React Frontend
 
-[Screenshots](https://codeberg.org/SentryShot/sentryshot-assets/src/branch/master/screenshots) | [Changelog](./misc/CHANGELOG.md) | [Codeberg](https://codeberg.org/SentryShot/sentryshot) | [Matrix](https://matrix.to/#/#sentryshot:matrix.org)
+Этот документ описывает архитектуру проекта SentryShot, включая его бэкенд API, систему аутентификации, и взаимодействие с фронтенд-приложением на React.
 
-## Overview
+## Оглавление
 
+1.  [Обзор Архитектуры](#обзор-архитектуры)
+2.  [Бэкенд SentryShot](#бэкенд-sentryshot)
+    *   [Технологии](#технологии-бэкенд)
+    *   [Конфигурация](#конфигурация-бэкенд)
+    *   [API Эндпоинты](#api-эндпоинты)
+3.  [Аутентификация](#аутентификация)
+    *   [Механизм](#механизм-аутентификации)
+    *   [Создание Пользователей](#создание-пользователей)
+    *   [CSRF Защита](#csrf-защита)
+4.  [Фронтенд React Приложение (`MyFrontendReactApp`)](#фронтенд-react-приложение)
+    *   [Технологии](#технологии-фронтенд)
+    *   [Конфигурация Фронтенда](#конфигурация-фронтенда)
+    *   [Взаимодействие с API](#взаимодействие-с-api)
+    *   [Потенциальные Проблемы и Рекомендации](#потенциальные-проблемы-и-рекомендации-фронтенд)
+5.  [Развертывание и Запуск (Docker)](#развертывание-и-запуск-docker)
+    *   [Настройка URL](#настройка-url)
+    *   [CORS](#cors)
 
-* Full resolution live view with sub 2 second delay
-* 24/7 recording to custom database
-* TFlite object detection with [custom model](https://codeberg.org/Curid/TF-CCTV)
-* Mobile-friendly web interface
+## 1. Обзор Архитектуры
 
+Проект состоит из двух основных частей:
 
-## Documentation
+*   **Бэкенд SentryShot**: Написан на Rust с использованием фреймворка Axum. Отвечает за обработку видеопотоков, запись, управление пользователями и предоставление API.
+*   **Фронтенд `MyFrontendReactApp`**: Написан на React (с TypeScript). Предоставляет пользовательский интерфейс для просмотра потоков, архивов, управления настройками и взаимодействия с бэкендом.
 
-- [Installation](./docs/1_Installation.md)
-- [Configuration](./docs/2_Configuration.md)
-- [TFlite Object Detection](./plugins/tflite/README.md)
-- [Motion Detection](./plugins/motion/README.md)
-- [Development](./docs/3_Development.md)
-- [API](./docs/4_API.md)
+Эти два компонента могут работать в отдельных Docker-контейнерах и взаимодействовать по сети.
 
-<br>
+## 2. Бэкенд SentryShot
 
-## License
+### Технологии (Бэкенд)
 
-Copyright (C) 2021-2025 The SentryShot authors
+*   **Язык**: Rust
+*   **Веб-фреймворк**: Axum
+*   **Асинхронность**: Tokio
+*   **Хранение данных**: Файловая система (конфигурации, логи, записи, пользователи в `accounts.json`)
+*   **Плагинная архитектура**: Функциональность, включая аутентификацию, может расширяться через плагины.
 
-This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
+### Конфигурация (Бэкенд)
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+*   Основная конфигурация SentryShot обычно находится в файле `sentryshot.toml` (или аналогичном) в конфигурационной директории.
+*   Конфигурационная директория также содержит `accounts.json` для аутентификации (при использовании плагина `auth_basic`).
+*   Плагины загружаются из `plugin_dir`, указанной в конфигурации.
 
-You should have received a copy of the GNU General Public License along with this program; if not, write to the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA. 
+### API Эндпоинты
+
+Ниже приведен список основных API эндпоинтов, предоставляемых бэкендом SentryShot. Некоторые эндпоинты требуют административных прав.
+
+**Потоковое видео (Стриминг):**
+
+*   `POST /api/streamer/start-session`: (Для SP стримера) Начинает сессию для потока.
+    *   Query params: `session-id`, `monitor-id`, `sub-stream`.
+*   `GET /api/streamer/play`: (Для SP стримера) Отдает видеопоток для активной сессии.
+    *   Query params: `session-id`, `monitor-id`, `sub-stream`.
+*   `GET /hls/{*path}`: (Для HLS стримера) Отдает HLS плейлисты и сегменты. Путь может быть `/stream/{*path}` в зависимости от конфигурации.
+*   `GET /vod/vod.mp4`: Отдает архивное видео (Video on Demand).
+    *   Query params: `monitor-id`, `start` (UnixNano), `end` (UnixNano), `cache-id`.
+    *   **Примечание**: Этот эндпоинт находится вне префикса `/api/`.
+
+**Записи (Recordings):**
+
+*   `GET /api/recording/query`: Запрашивает список записей.
+    *   Query params: `monitors` (ID через запятую), `limit` (число), `reverse` (boolean), `include-data` (boolean), `recording-id` (для пагинации).
+*   `DELETE /api/recording/delete/{id}`: Удаляет запись по ID.
+*   `GET /api/recording/thumbnail/{id}`: Отдает миниатюру для записи.
+*   `GET /api/recording/video/{id}`: Отдает видеофайл записи (может быть менее предпочтительно, чем VOD).
+
+**Логирование (Logging):**
+
+*   `GET /api/log/query`: Запрашивает сохраненные логи.
+    *   Query params: `levels`, `sources`, `monitors`, `time` (Unix micro), `limit`.
+*   `GET /api/log/feed`: WebSocket для получения логов в реальном времени (требует прав администратора).
+    *   Query params: `levels`, `sources`, `monitors`.
+*   `GET /api/log/slow-poll`: Альтернативный механизм получения логов, если WebSocket недоступен (требует прав администратора).
+
+**Управление Аккаунтами (Account Management):**
+
+*   `GET /api/account/my-token`: Получает CSRF-токен для текущего аутентифицированного пользователя.
+*   `GET /api/accounts`: (Admin) Получает список всех аккаунтов.
+*   `PUT /api/account`: (Admin) Создает нового пользователя или обновляет существующего.
+    *   Тело запроса: `AccountSetRequest` JSON (`id`, `username`, `plain_password?`, `isAdmin`).
+*   `DELETE /api/account`: (Admin) Удаляет пользователя.
+    *   Тело запроса: JSON с `id` пользователя. *(Примечание: точный формат тела для удаления может потребовать уточнения, обычно ID передается в пути или как query param)*. Фронтенд использовал `DELETE /api/monitor/{monitorId}`, возможно, аналогично для аккаунтов.
+
+**Управление Мониторами (Monitor Management - Admin):**
+
+*   `GET /api/monitors`: Получает список всех мониторов (камер).
+*   `PUT /api/monitor`: Создает или обновляет конфигурацию монитора.
+    *   Тело запроса: JSON с конфигурацией монитора.
+*   `DELETE /api/monitor/{id}` или `DELETE /api/monitor` с ID в теле: Удаляет монитор.
+*   `POST /api/monitor/restart`: Перезапускает монитор.
+    *   Тело запроса: JSON с `id` монитора.
+*   `GET /api/monitor-groups`: Получает группы мониторов.
+*   `PUT /api/monitor-groups`: Обновляет группы мониторов.
+
+**Другие эндпоинты:**
+
+*   `GET /`: Корневой путь, обычно редиректит на `/live`.
+*   `GET /live`, `/recordings`, `/settings`, `/logs`: HTML страницы, генерируемые на бэкенде с использованием шаблонов.
+*   `GET /assets/{*file}`: Отдает статические ассеты (CSS, JS, изображения) для этих HTML страниц.
+
+## 3. Аутентификация
+
+### Механизм Аутентификации
+
+SentryShot использует плагинную систему для аутентификации. Стандартный и наиболее вероятный плагин — `auth_basic`.
+
+*   **Basic Authentication**: Для всех API-запросов используется HTTP Basic Authentication. Заголовок `Authorization: Basic <base64_encoded_username_password>` должен присутствовать.
+*   **Хранение Пользователей**: Плагин `auth_basic` хранит информацию о пользователях в файле `accounts.json` в конфигурационной директории SentryShot.
+    *   Файл содержит JSON-объект, где ключи — это `AccountId`, а значения — объекты `Account` (включая `username`, хэшированный пароль `password` (Argon2), и флаг `isAdmin`).
+*   **Хэширование Паролей**: Пароли хэшируются с использованием Argon2.
+
+### Создание Пользователей
+
+*   **Первый пользователь/Администратор**: SentryShot с плагином `auth_basic` не предоставляет встроенного UI или автоматического создания первого администратора. Если `accounts.json` пуст (`{}`), ни один пользователь не сможет войти.
+    *   **Рекомендуемый способ**: Ручное создание или редактирование файла `accounts.json`.
+        *   `AccountId` должен быть уникальной строкой из 16 разрешенных символов.
+        *   Пароль должен быть хэширован с помощью Argon2 (например, утилитой `argon2`) и представлен в формате PHC string.
+*   **Через API (для администраторов)**: Существующие администраторы могут создавать/изменять пользователей через эндпоинт `PUT /api/account`.
+
+    Пример `accounts.json`:
+    ```json
+    {
+      "youruniqueadminid": {
+        "id": "youruniqueadminid",
+        "username": "admin",
+        "password": "$argon2id$v=19$m=65536,t=3,p=1$randomsaltstring$argon2hashoutput",
+        "isAdmin": true
+      }
+    }
+    ```
+
+### CSRF Защита
+
+*   Для запросов, изменяющих состояние (PUT, POST, DELETE, PATCH), SentryShot требует CSRF-токен.
+*   Клиент (фронтенд) должен сначала получить CSRF-токен, сделав GET-запрос на `/api/account/my-token` (используя Basic Auth).
+*   Полученный токен затем должен передаваться в заголовке `X-CSRF-TOKEN` для всех последующих модифицирующих запросов.
+
+## 4. Фронтенд React Приложение (`MyFrontendReactApp`)
+
+### Технологии (Фронтенд)
+
+*   **Библиотека/Фреймворк**: React
+*   **Язык**: TypeScript
+*   **Сборщик**: Vite
+*   **HTTP-клиент**: `fetch` API
+
+### Конфигурация Фронтенда
+
+Ключевые файлы конфигурации и API:
+
+*   **`MyFrontendReactApp/src/api/sentryshot.ts`**: Содержит основную логику для взаимодействия с API SentryShot, включая аутентификацию, получение данных и управление ресурсами.
+*   **`MyFrontendReactApp/src/config/sentryshot.ts`**: Управляет конфигурацией подключения к бэкенду (URL, порты, настройки).
+
+**Важно**: В `MyFrontendReactApp/src/api/sentryshot.ts` (или в `config/sentryshot.ts` и затем импортировано в `api/sentryshot.ts`) должны быть правильно установлены константы:
+
+```typescript
+const API_BASE_URL = 'http://<хост_бэкенда>:<порт_бэкенда>'; // Например, 'http://localhost:8080'
+const STREAM_BASE_URL = 'http://<хост_бэкенда>:<порт_бэкенда>'; // Обычно совпадает с API_BASE_URL для SentryShot
+```
+
+Если эти URL не указаны или указаны неверно (например, пустые строки, если фронтенд и бэкенд на разных портах), взаимодействие не будет работать.
+
+### Взаимодействие с API
+
+Фронтенд (`api/sentryshot.ts`) реализует следующие основные функции:
+
+*   **Аутентификация**:
+    *   `AuthManager` управляет учетными данными и CSRF-токенами.
+    *   При логине: сохраняет `username` и `password`, запрашивает CSRF-токен с `/api/account/my-token`.
+    *   Для всех запросов: добавляет заголовок `Authorization: Basic ...`.
+    *   Для модифицирующих запросов: добавляет заголовок `X-CSRF-TOKEN`.
+*   **Запросы к эндпоинтам**: Использует `fetch` для обращения к API бэкенда, формируя URL на основе `API_BASE_URL`.
+*   **Обработка данных**: Преобразует полученные JSON-ответы в интерфейсы TypeScript (`Monitor`, `RecordingInfo`, `LogEntry` и т.д.).
+
+### Потенциальные Проблемы и Рекомендации (Фронтенд)
+
+1.  **URL Эндпоинтов**:
+    *   `DELETE /api/monitor/{id}`: Убедитесь, что ID передается как часть пути.
+    *   `GET /api/recording/query`: Используется для получения записей. Фронтенд должен корректно формировать query-параметры (`monitors`, `include-data`, `reverse`, `limit`, `recording-id` для пагинации). Фильтрация по дате может потребовать доработки на клиенте или бэкенде.
+    *   WebSocket для логов: Должен использовать `ws(s)://<host_бэкенда>:<port_бэкенда>/api/log/feed`.
+2.  **Потоковое видео (Streaming)**:
+    *   **HLS**: Фронтенд формирует URL вида `/stream/{monitorId}/index.m3u8` (или `/hls/...`). Бэкенд SentryShot (или прокси перед ним) должен корректно обрабатывать эти пути.
+    *   **SP Streamer (Slow Poll)**: Если бэкенд использует этот тип стримера, текущая логика фронтенда (формирование HLS URL) не будет работать. Потребуется:
+        1.  `POST /api/streamer/start-session`
+        2.  `GET /api/streamer/play` с ID сессии.
+3.  **Video on Demand (VOD)**:
+    *   Фронтенд генерирует URL вида `/vod/vod.mp4?monitor-id=...&start=...&end=...`. Бэкенд должен поддерживать обработку этих query-параметров для своего эндпоинта `/vod/vod.mp4`.
+4.  **Управление детекторами (Motion/Object)**:
+    *   Эндпоинты `PATCH /api/monitor/{monitorId}/motion/{action}` и `PATCH /api/monitor/{monitorId}/tflite/{action}` не являются стандартными для SentryShot.
+    *   **Решение**: Либо реализовать их на бэкенде (например, через плагины), либо управлять этими флагами через общий запрос `PUT /api/monitor`, обновляя весь объект монитора.
+5.  **`GET /api/system/info`**: Этот эндпоинт, вероятно, не существует на бэкенде SentryShot и должен быть удален из фронтенда или реализован на бэкенде.
+
+## 5. Развертывание и Запуск (Docker)
+
+При запуске фронтенда и бэкенда в отдельных Docker-контейнерах на одной машине (например, через Docker Compose):
+
+### Настройка URL
+
+*   **Фронтенд (`MyFrontendReactApp/src/api/sentryshot.ts` или `config/sentryshot.ts`)**:
+    *   `API_BASE_URL` должен указывать на адрес и порт, по которому контейнер бэкенда SentryShot доступен *с точки зрения браузера пользователя*. Если порты маппятся на хост, это будет `http://<хост_машины>:<маппленный_порт_sentryshot>`. Например, если SentryShot запущен с `-p 8080:8080`, то URL будет `http://localhost:8080` (если доступ из браузера на той же машине).
+    *   `STREAM_BASE_URL` аналогично.
+*   **Пример**:
+    *   Бэкенд SentryShot слушает порт `8080` внутри своего контейнера и маппится на порт `8080` хоста.
+    *   Фронтенд React слушает порт `80` (или другой, например `3000` при разработке) внутри своего контейнера и маппится на порт `2020` хоста.
+    *   Тогда в React приложении `API_BASE_URL` и `STREAM_BASE_URL` должны быть `http://localhost:8080` (если браузер на хост-машине).
+
+### CORS (Cross-Origin Resource Sharing)
+
+Поскольку фронтенд (например, `http://localhost:2020`) и бэкенд (например, `http://localhost:8080`) будут работать на разных портах (разные "origin"), бэкенд SentryShot **должен** быть сконфигурирован для обработки CORS-запросов.
+
+*   **Настройка в Axum (SentryShot бэкенд)**: Используйте `tower_http::cors::CorsLayer`.
+    ```rust
+    use tower_http::cors::CorsLayer;
+    use axum::http::{header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ORIGIN, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_HEADERS, HeaderName}, Method, HeaderValue};
+
+    // ... в функции настройки роутов ...
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:2020".parse::<HeaderValue>().unwrap()) // Замените на URL вашего фронтенда
+        .allow_methods(vec![Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::OPTIONS, Method::HEAD])
+        .allow_headers(vec![AUTHORIZATION, ACCEPT, CONTENT_TYPE, ORIGIN, HeaderName::from_static("x-csrf-token")])
+        .allow_credentials(true);
+
+    let router = self.router.clone().layer(cors);
+    // ...
+    ```
+*   Не забудьте добавить `tower-http = { version = "0.5", features = ["cors"] }` (или актуальную версию) в `Cargo.toml` бэкенда.
+
+Без правильной настройки CORS браузер будет блокировать API-запросы от фронтенда к бэкенду. 
